@@ -1,9 +1,11 @@
 package study.querydsl;
 
+import com.querydsl.core.BooleanBuilder;
 import com.querydsl.core.QueryResults;
 import com.querydsl.core.Tuple;
 import com.querydsl.core.types.ExpressionUtils;
-import com.querydsl.core.types.Projections;
+import com.querydsl.core.types.Predicate;
+import com.querydsl.core.types.dsl.BooleanExpression;
 import com.querydsl.core.types.dsl.CaseBuilder;
 import com.querydsl.core.types.dsl.Expressions;
 import com.querydsl.jpa.JPAExpressions;
@@ -15,6 +17,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.annotation.Commit;
 import org.springframework.transaction.annotation.Transactional;
 import study.querydsl.dto.MemberDto;
+import study.querydsl.dto.QMemberDto;
 import study.querydsl.dto.UserDto;
 import study.querydsl.entity.Member;
 import study.querydsl.entity.QMember;
@@ -27,10 +30,10 @@ import javax.persistence.PersistenceUnit;
 import java.util.List;
 
 import static com.querydsl.core.types.Projections.*;
-import static com.querydsl.jpa.JPAExpressions.*;
+import static com.querydsl.jpa.JPAExpressions.select;
 import static org.assertj.core.api.Assertions.assertThat;
 import static study.querydsl.entity.QMember.member;
-import static study.querydsl.entity.QTeam.*;
+import static study.querydsl.entity.QTeam.team;
 
 @Transactional
 @SpringBootTest
@@ -571,6 +574,128 @@ public class QuerydslBasicTests {
         }
     }
 
+    /**
+     * Projections 의 문제점
+     * 런타임에 문제가 발생함. constructor(MemberDto.class, member.username, member.age, member.id)
+     * MemberDto 생성자에 id 인수를 받는 파라미터가 없는데 컴파일이 됨
+     * <p>
+     * Q 타입은 컴파일 타임에 해당 에러를 잡을 수 있음
+     * <p>
+     * 단, 한가지 고민거리가 있음
+     * <p>
+     * QueryProjection 애너테이션을 사용해서 Q 타입을 만들어줘야 하는 것
+     * MemberDto 에 Querydsl 에 의존성을 갖게 됨
+     * DTO 는 여러 Layer에 걸쳐 돌아다니는데 Querydsl에 의존적이면 문제가 될 수 있음
+     * <p>
+     * -> 해당 문제를 감수할 수 있으면 가장 좋은 해결책임
+     */
+    @Test
+    void findDtoByQueryProjection() {
+        List<MemberDto> result = query
+                .select(new QMemberDto(member.username, member.age))
+                .from(member)
+                .fetch();
+
+        for (MemberDto memberDto : result) {
+            System.out.println("memberDto = " + memberDto);
+        }
+    }
+
+    /* 동적 쿼리 */
+    @Test
+    void dynamicQuery_BooleanBuilder() {
+        String usernameParam = "member1";
+        Integer ageParam = null;
+
+        List<Member> result = searchMember1(usernameParam, ageParam);
+
+        for (Member member1 : result) {
+            System.out.println("member1 = " + member1);
+        }
+
+        assertThat(result.size()).isEqualTo(1);
+    }
+
+    private List<Member> searchMember1(String usernameCond, Integer ageCond) {
+        // 필수
+//        BooleanBuilder builder = new BooleanBuilder(member.username.eq(usernameCond));
+        BooleanBuilder builder = new BooleanBuilder();
+
+        if (usernameCond != null)
+            builder.and(member.username.eq(usernameCond));
+
+        if (ageCond != null)
+            builder.and(member.age.eq(ageCond));
+
+        return query
+                .selectFrom(member)
+                .where(builder)
+                .fetch();
+    }
+
+    /* 다중 파라미터 where 동적쿼리 (강사님이 좋아하는 방법) */
+    @Test
+    void dynamicQuery_whereParam() {
+        String usernameParam = "member1";
+        Integer ageParam = 10;
+
+        List<Member> result = searchMember2(usernameParam, ageParam);
+
+        for (Member member1 : result) {
+            System.out.println("member1 = " + member1);
+        }
+
+        assertThat(result.size()).isEqualTo(1);
+    }
+
+    private List<Member> searchMember2(String usernameCond, Integer ageCond) {
+        return query
+                .selectFrom(member)
+//                .where(usernameEq(usernameCond), ageEq(ageCond))
+                .where(allEq(usernameCond, ageCond))
+                .fetch();
+    }
+
+    private BooleanExpression usernameEq(String usernameCond) {
+        return usernameCond != null ? member.username.eq(usernameCond) : null;
+    }
+
+    private BooleanExpression ageEq(Integer ageCond) {
+        return ageCond != null ? member.age.eq(ageCond) : null;
+    }
+
+    private Predicate allEq(String usernameCond, Integer ageCond) {
+        return usernameEq(usernameCond).and(ageEq(ageCond));
+    }
+
+
+    /* 벌크 연산 */
+    @Test
+    void bulkUpdate() {
+        // member1, member2 -> '비회원' 으로 변경
+        long count = query
+                .update(member)
+                .set(member.username, "비회원")
+                .where(member.age.lt(28))
+                .execute();
+
+        em.flush();
+        em.clear();
+
+        // 벌크 연산은 영속성 컨텍스트의 상태를 무시하고 DB로 쿼리를 날림
+        // 영속성 컨텍스트의 데이터와 DB의 데이터가 불일치
+
+        // 다음 조회할 때 DB가 아니라 영속성 컨텍스트의 값이 조회됨
+        // DB에 조회 쿼리가 나가지만 영속성 컨텍스트의 우선순위가 더 높기때문에 결과 데이터를 버림
+        // 그래서 벌크 연산 이후에는 항상 flush와 clear를 호출해야함.
+        List<Member> members = query
+                .selectFrom(member)
+                .fetch();
+
+        for (Member member1 : members) {
+            System.out.println("member1 = " + member1);
+        }
+    }
 
 }
 
